@@ -1,0 +1,16 @@
+{
+  "name": "acquisition-radar-agent",
+  "version": "1.0.0",
+  "description": "AI agent that scans M&A acquisition rumors, fetches stock prices, and emails a daily digest",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.14",
+    "yahoo-finance2": "^2.9.0"
+  }
+}
