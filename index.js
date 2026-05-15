@@ -27,7 +27,7 @@ async function fetchRumors() {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 3000,
       system: `You are an M&A intelligence analyst. Search the web for the latest acquisition rumors
 from the past 24 hours. Focus on: ${CONFIG.searchTargets}.
