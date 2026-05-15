@@ -27,7 +27,7 @@ async function fetchRumors() {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 3000,
       system: `You are an M&A intelligence analyst. Search the web for the latest acquisition rumors
 from the past 24 hours. Focus on: ${CONFIG.searchTargets}.
@@ -83,21 +83,31 @@ published in the last 24 hours for: ${CONFIG.searchTargets}. Include article URL
   return JSON.parse(jsonMatch[0]);
 }
 
-// ─── Step 2: Fetch stock price from Alpha Vantage ──────────────────────────
+// ─── Step 2: Fetch stock price from Alpha Vantage (with timeout) ───────────
 async function fetchStockPrice(ticker) {
   if (!ticker) return null;
   try {
-    const url = "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" + ticker + "&apikey=" + CONFIG.alphaVantageKey;
-    const response = await fetch(url);
+    const url =
+      "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" +
+      ticker +
+      "&apikey=" +
+      CONFIG.alphaVantageKey;
+
+    // 8-second timeout — if Alpha Vantage is slow, skip and move on
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+
     const data = await response.json();
     const quote = data["Global Quote"];
     if (!quote || !quote["05. price"]) throw new Error("No price data");
-    const price = parseFloat(quote["05. price"]);
-    const change = parseFloat(quote["10. change percent"]);
+
     return {
-      price: price,
+      price: parseFloat(quote["05. price"]),
       currency: "USD",
-      changePercent: change,
+      changePercent: parseFloat(quote["10. change percent"]),
       exchange: "Alpha Vantage",
       marketCap: null,
     };
@@ -138,8 +148,9 @@ async function enrichRumors(rumors) {
       ? calcAcquisitionPrice(stock.price, r.rumoredBidPrice, r.rumoredPremium)
       : null;
     results.push(Object.assign({}, r, { stock, priceCalc }));
-    // Wait 12 seconds between requests (Alpha Vantage free = 5 per minute)
-    if (r.targetTicker) await new Promise(res => setTimeout(res, 12000));
+    // Only wait 12 sec if fetch succeeded (respect rate limit).
+    // If it failed/timed out, skip the delay and move on immediately.
+    if (r.targetTicker && stock) await new Promise((res) => setTimeout(res, 12000));
   }
   return results;
 }
@@ -154,54 +165,122 @@ function buildEmail(enrichedRumors) {
 
   function fmt(n) {
     if (n == null) return "—";
-    return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return n.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
   }
 
-  const cards = enrichedRumors.length === 0
-    ? "<p style='text-align:center;color:#6b7280;padding:32px;'>No acquisition rumors found in the last 24 hours.</p>"
-    : enrichedRumors.map(function(r) {
-        const b = badge[r.confidence] || badge.medium;
-        const hasStock = r.stock && r.stock.price;
-        const upside = hasStock && r.priceCalc
-          ? (((r.priceCalc.expectedPrice - r.stock.price) / r.stock.price) * 100).toFixed(1)
-          : null;
+  const cards =
+    enrichedRumors.length === 0
+      ? "<p style='text-align:center;color:#6b7280;padding:32px;'>No acquisition rumors found in the last 24 hours.</p>"
+      : enrichedRumors
+          .map(function (r) {
+            const b = badge[r.confidence] || badge.medium;
+            const hasStock = r.stock && r.stock.price;
+            const upside =
+              hasStock && r.priceCalc
+                ? (
+                    ((r.priceCalc.expectedPrice - r.stock.price) /
+                      r.stock.price) *
+                    100
+                  ).toFixed(1)
+                : null;
 
-        return "<div style='background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:20px;margin-bottom:16px;'>" +
-          "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;'>" +
-          "<div><div style='font-size:19px;font-weight:700;color:#111827'>" + r.targetCompany +
-          (r.targetTicker ? " <span style='font-size:13px;color:#6b7280;font-weight:400'>(" + r.targetTicker + ")</span>" : "") +
-          "</div><div style='color:#6b7280;font-size:13px;margin-top:3px;'>rumored acquirer: <strong style='color:#1d4ed8'>" + r.acquirerCompany + "</strong></div></div>" +
-          "<span style='background:" + b.bg + ";color:" + b.color + ";font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;margin-left:12px;'>" + r.confidence.toUpperCase() + "</span></div>" +
-          (hasStock ? "<div style='display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;'>" +
-            "<div style='flex:1;min-width:130px;background:#f8fafc;border-radius:8px;padding:12px 14px;'>" +
-            "<div style='color:#6b7280;font-size:10px;font-weight:700;text-transform:uppercase;margin-bottom:4px;'>Current Price</div>" +
-            "<div style='font-size:22px;font-weight:800;color:#111827'>$" + fmt(r.stock.price) + "</div>" +
-            "<div style='color:#9ca3af;font-size:11px;margin-top:2px'>" + (r.targetTicker || "") + "</div></div>" +
-            (r.priceCalc ? "<div style='flex:1;min-width:130px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px;'>" +
-            "<div style='color:#166534;font-size:10px;font-weight:700;text-transform:uppercase;margin-bottom:4px;'>Est. Acquisition Price</div>" +
-            "<div style='font-size:22px;font-weight:800;color:#15803d'>$" + fmt(r.priceCalc.expectedPrice) + "</div>" +
-            "<div style='color:#16a34a;font-size:11px;font-weight:600;margin-top:2px'>+" + upside + "% upside &middot; " + r.priceCalc.premium + "% premium (" + r.priceCalc.source + ")</div></div>" : "") +
-            "</div>" :
-            "<div style='background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:14px;color:#92400e;font-size:13px;'>" +
-            (r.targetTicker ? "Price unavailable for " + r.targetTicker : "Private company") + "</div>") +
-          "<p style='color:#374151;font-size:14px;line-height:1.65;margin:0 0 12px'>" + r.summary + "</p>" +
-          "<div style='border-top:1px solid #f3f4f6;padding-top:10px;display:flex;justify-content:space-between;align-items:center;'>" +
-          "<span style='color:#9ca3af;font-size:12px'>📰 " + r.articleSource + "</span>" +
-          "<a href='" + r.articleUrl + "' style='color:#2563eb;font-size:13px;font-weight:600;text-decoration:none'>Read article →</a></div></div>";
-      }).join("");
+            return (
+              "<div style='background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:20px;margin-bottom:16px;'>" +
+              "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;'>" +
+              "<div><div style='font-size:19px;font-weight:700;color:#111827'>" +
+              r.targetCompany +
+              (r.targetTicker
+                ? " <span style='font-size:13px;color:#6b7280;font-weight:400'>(" +
+                  r.targetTicker +
+                  ")</span>"
+                : "") +
+              "</div><div style='color:#6b7280;font-size:13px;margin-top:3px;'>rumored acquirer: <strong style='color:#1d4ed8'>" +
+              r.acquirerCompany +
+              "</strong></div></div>" +
+              "<span style='background:" +
+              b.bg +
+              ";color:" +
+              b.color +
+              ";font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;margin-left:12px;'>" +
+              r.confidence.toUpperCase() +
+              "</span></div>" +
+              (hasStock
+                ? "<div style='display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;'>" +
+                  "<div style='flex:1;min-width:130px;background:#f8fafc;border-radius:8px;padding:12px 14px;'>" +
+                  "<div style='color:#6b7280;font-size:10px;font-weight:700;text-transform:uppercase;margin-bottom:4px;'>Current Price</div>" +
+                  "<div style='font-size:22px;font-weight:800;color:#111827'>$" +
+                  fmt(r.stock.price) +
+                  "</div>" +
+                  "<div style='color:#9ca3af;font-size:11px;margin-top:2px'>" +
+                  (r.targetTicker || "") +
+                  "</div></div>" +
+                  (r.priceCalc
+                    ? "<div style='flex:1;min-width:130px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px;'>" +
+                      "<div style='color:#166534;font-size:10px;font-weight:700;text-transform:uppercase;margin-bottom:4px;'>Est. Acquisition Price</div>" +
+                      "<div style='font-size:22px;font-weight:800;color:#15803d'>$" +
+                      fmt(r.priceCalc.expectedPrice) +
+                      "</div>" +
+                      "<div style='color:#16a34a;font-size:11px;font-weight:600;margin-top:2px'>+" +
+                      upside +
+                      "% upside &middot; " +
+                      r.priceCalc.premium +
+                      "% premium (" +
+                      r.priceCalc.source +
+                      ")</div></div>"
+                    : "") +
+                  "</div>"
+                : "<div style='background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:14px;color:#92400e;font-size:13px;'>" +
+                  (r.targetTicker
+                    ? "Price unavailable for " + r.targetTicker
+                    : "Private company") +
+                  "</div>") +
+              "<p style='color:#374151;font-size:14px;line-height:1.65;margin:0 0 12px'>" +
+              r.summary +
+              "</p>" +
+              "<div style='border-top:1px solid #f3f4f6;padding-top:10px;display:flex;justify-content:space-between;align-items:center;'>" +
+              "<span style='color:#9ca3af;font-size:12px'>📰 " +
+              r.articleSource +
+              "</span>" +
+              "<a href='" +
+              r.articleUrl +
+              "' style='color:#2563eb;font-size:13px;font-weight:600;text-decoration:none'>Read article →</a></div></div>"
+            );
+          })
+          .join("");
 
   const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
-  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  const dateStr = now.toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+  const timeStr = now.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
   return {
-    subject: "📡 M&A Radar · " + enrichedRumors.length + " rumor" + (enrichedRumors.length !== 1 ? "s" : "") + " · " + dateStr,
-    html: "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'>" +
+    subject:
+      "📡 M&A Radar · " +
+      enrichedRumors.length +
+      " rumor" +
+      (enrichedRumors.length !== 1 ? "s" : "") +
+      " · " +
+      dateStr,
+    html:
+      "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'>" +
       "<div style='max-width:600px;margin:0 auto;padding:24px 16px;'>" +
       "<div style='background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 100%);border-radius:14px;padding:28px;margin-bottom:20px;text-align:center;'>" +
       "<div style='font-size:32px;margin-bottom:6px'>📡</div>" +
       "<h1 style='color:#fff;margin:0;font-size:22px;font-weight:800;'>M&A Acquisition Radar</h1>" +
-      "<p style='color:#93c5fd;margin:6px 0 0;font-size:13px'>" + dateStr + " · " + timeStr + "</p></div>" +
+      "<p style='color:#93c5fd;margin:6px 0 0;font-size:13px'>" +
+      dateStr +
+      " · " +
+      timeStr +
+      "</p></div>" +
       cards +
       "<div style='text-align:center;padding:20px 0;color:#9ca3af;font-size:11px;'>Powered by Claude AI + Alpha Vantage<br>Not financial advice.</div>" +
       "</div></body></html>",
